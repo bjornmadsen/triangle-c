@@ -1,5 +1,30 @@
 /*****************************************************************************/
 /*                                                                           */
+/*  NOTICE OF MODIFICATIONS                                                  */
+/*                                                                           */
+/*  This is a MODIFIED version of Triangle 1.6. It is not the original       */
+/*  distribution by Jonathan Richard Shewchuk, who remains the copyright     */
+/*  holder of this file including all modifications. The full history of     */
+/*  changes is in https://github.com/bjornmadsen/triangle-c (forked from     */
+/*  https://github.com/drufat/triangle-c, based on the libigl copy).         */
+/*                                                                           */
+/*  Modifications in this fork (2026), for robustness on degenerate input:   */
+/*    - locate(): return OUTSIDE instead of walking into the dummy triangle. */
+/*    - makevertexmap(): no triangle for vertices outside the mesh.          */
+/*    - divconqdelaunay(): error out when all input vertices are identical.  */
+/*    - segmentintersection(): reject near-degenerate intersections and      */
+/*      fail if splitting a segment leaves an inverted triangle.             */
+/*    - scoutsegment(): reject a collinear vertex outside the segment.       */
+/*    - finddirection(): bound the search loop.                              */
+/*    - formskeleton(): fail if segment recovery leaves an inverted          */
+/*      triangle (checked with exact arithmetic).                            */
+/*  Earlier changes by other contributors (library wrapper, RuntimeError     */
+/*  on failure, compiler warning fixes) are listed in the git history.       */
+/*                                                                           */
+/*****************************************************************************/
+
+/*****************************************************************************/
+/*                                                                           */
 /*      888888888        ,o,                          / 888                  */
 /*         888    88o88o  "    o8888o  88o8888o o88888o 888  o88888o         */
 /*         888    888    888       88b 888  888 888 888 888 d888  88b        */

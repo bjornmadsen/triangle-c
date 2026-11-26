@@ -1,3 +1,10 @@
+NOTICE: this is a MODIFIED version of Triangle 1.6, not the original
+distribution. triangle.c has been changed; see the "NOTICE OF
+MODIFICATIONS" block at the top of triangle.c and the git history of
+https://github.com/bjornmadsen/triangle-c. Jonathan Richard Shewchuk
+remains the copyright holder of the code and all modifications, under the
+terms below.
+
 Triangle
 A Two-Dimensional Quality Mesh Generator and Delaunay Triangulator.
 Version 1.6
