@@ -7020,9 +7020,19 @@ void makevertexmap(struct mesh *m, struct behavior *b)
 {
   struct otri triangleloop;
   vertex triorg;
+  vertex vertexloop;
 
   if (b->verbose) {
     printf("    Constructing mapping from vertices to triangles.\n");
+  }
+  /* Vertices in no triangle (e.g. discarded duplicates) must map to NULL, */
+  /*   not to uninitialized memory, so insertsegment() falls back on       */
+  /*   point location for them.                                            */
+  traversalinit(&m->vertices);
+  vertexloop = vertextraverse(m);
+  while (vertexloop != (vertex) NULL) {
+    setvertex2tri(vertexloop, (triangle) NULL);
+    vertexloop = vertextraverse(m);
   }
   traversalinit(&m->triangles);
   triangleloop.tri = triangletraverse(m);
@@ -7244,6 +7254,7 @@ enum locateresult locate(struct mesh *m, struct behavior *b,
   VOID **sampleblock;
   char *firsttri;
   struct otri sampletri;
+  struct otri backtracktri;
   vertex torg, tdest;
   INT_PTR alignptr = 0;
   REAL searchdist, dist;
@@ -7370,7 +7381,15 @@ enum locateresult locate(struct mesh *m, struct behavior *b,
   if (ahead < 0.0) {
     /* Turn around so that `searchpoint' is to the left of the */
     /*   edge specified by `searchtri'.                        */
+    otricopy(*searchtri, backtracktri);
     symself(*searchtri);
+    /* If that edge is on the boundary, `searchpoint' lies outside the mesh. */
+    /*   preciselocate() must never start from the dummy triangle, whose    */
+    /*   vertices are NULL.                                                 */
+    if (searchtri->tri == m->dummytri) {
+      otricopy(backtracktri, *searchtri);
+      return OUTSIDE;
+    }
   } else if (ahead == 0.0) {
     /* Check if `searchpoint' is between `torg' and `tdest'. */
     if (((torg[0] < searchpoint[0]) == (searchpoint[0] < tdest[0])) &&
@@ -9480,6 +9499,11 @@ long divconqdelaunay(struct mesh *m, struct behavior *b)
     }
   }
   i++;
+  if (i < 2) {
+    trifree((VOID *) sortarray);
+    printf("Error:  Input vertices are all identical.\n");
+    triexit(1);
+  }
   if (b->dwyer) {
     /* Re-sort the array of vertices to accommodate alternating cuts. */
     divider = i >> 1;
@@ -10899,6 +10923,7 @@ enum finddirectionresult finddirection(struct mesh *m, struct behavior *b,
   vertex leftvertex, rightvertex;
   REAL leftccw, rightccw;
   int leftflag, rightflag;
+  long turns;
   triangle ptr;           /* Temporary variable used by onext() and oprev(). */
 
   org(*searchtri, startvertex);
@@ -10920,8 +10945,17 @@ enum finddirectionresult finddirection(struct mesh *m, struct behavior *b,
       rightflag = 0;
     }
   }
+  /* In a valid mesh, turning stops before going all the way around      */
+  /*   startvertex.  If it doesn't, the mesh is corrupt (inverted         */
+  /*   triangles), and turning would go on forever.                       */
+  turns = 0;
   while (leftflag) {
     /* Turn left until satisfied. */
+    if (++turns > m->triangles.items) {
+      printf("Internal error in finddirection():  Corrupt mesh around\n");
+      printf("  (%.12g, %.12g).\n", startvertex[0], startvertex[1]);
+      internalerror();
+    }
     onextself(*searchtri);
     if (searchtri->tri == m->dummytri) {
       printf("Internal error in finddirection():  Unable to find a\n");
@@ -10937,6 +10971,11 @@ enum finddirectionresult finddirection(struct mesh *m, struct behavior *b,
   }
   while (rightflag) {
     /* Turn right until satisfied. */
+    if (++turns > m->triangles.items) {
+      printf("Internal error in finddirection():  Corrupt mesh around\n");
+      printf("  (%.12g, %.12g).\n", startvertex[0], startvertex[1]);
+      internalerror();
+    }
     oprevself(*searchtri);
     if (searchtri->tri == m->dummytri) {
       printf("Internal error in finddirection():  Unable to find a\n");
@@ -10976,20 +11015,64 @@ enum finddirectionresult finddirection(struct mesh *m, struct behavior *b,
 /*                                                                           */
 /*****************************************************************************/
 
+/* Intersections of segments closer than this fraction of a segment's length */
+/*   to one of its endpoints are treated as degenerate.                      */
+
+#define INTERSECTIONEPS 1.0e-10
+
+/* Returns 1 if every triangle around the origin of `fantri' is          */
+/*   counterclockwise, 0 if any is inverted or flat.                     */
+
+int fanisvalid(struct mesh *m, struct behavior *b, struct otri *fantri)
+{
+  struct otri walktri;
+  vertex torg, tdest, tapex;
+  triangle ptr;           /* Temporary variable used by onext() and oprev(). */
+
+  otricopy(*fantri, walktri);
+  do {
+    org(walktri, torg);
+    dest(walktri, tdest);
+    apex(walktri, tapex);
+    if (counterclockwise(m, b, torg, tdest, tapex) <= 0.0) {
+      return 0;
+    }
+    onextself(walktri);
+  } while ((walktri.tri != m->dummytri) && !otriequal(walktri, *fantri));
+  if (walktri.tri == m->dummytri) {
+    /* Hit the boundary; check the rest of the fan in the other direction. */
+    oprev(*fantri, walktri);
+    while (walktri.tri != m->dummytri) {
+      org(walktri, torg);
+      dest(walktri, tdest);
+      apex(walktri, tapex);
+      if (counterclockwise(m, b, torg, tdest, tapex) <= 0.0) {
+        return 0;
+      }
+      oprevself(walktri);
+    }
+  }
+  return 1;
+}
+
 void segmentintersection(struct mesh *m, struct behavior *b,
                          struct otri *splittri, struct osub *splitsubseg,
                          vertex endpoint2)
 {
   struct osub opposubseg;
+  struct otri oppotri;
   vertex endpoint1;
   vertex torg, tdest;
   vertex leftvertex, rightvertex;
   vertex newvertex;
+  vertex farvertex;
   enum insertvertexresult success;
   REAL ex, ey;
   REAL tx, ty;
   REAL etx, ety;
   REAL split, denom;
+  REAL along;
+  int degenerate;
   int i;
   triangle ptr;                       /* Temporary variable used by onext(). */
   subseg sptr;                        /* Temporary variable used by snext(). */
@@ -11025,6 +11108,31 @@ void segmentintersection(struct mesh *m, struct behavior *b,
   "  Splitting subsegment (%.12g, %.12g) (%.12g, %.12g) at (%.12g, %.12g).\n",
            torg[0], torg[1], tdest[0], tdest[1], newvertex[0], newvertex[1]);
   }
+  /* With nearly parallel segments, roundoff can put the intersection     */
+  /*   vertex at (or a hair away from) an endpoint of either segment, or  */
+  /*   where splitting the subsegment would create inverted or flat       */
+  /*   triangles.  Either corrupts the mesh, so reject the intersection   */
+  /*   unless it is clearly interior to both segments and each of the     */
+  /*   (up to) four triangles created by the split is counterclockwise.   */
+  along = ((torg[0] - endpoint1[0]) * ty - (torg[1] - endpoint1[1]) * tx) /
+          denom;
+  sym(*splittri, oppotri);
+  degenerate = !(split > INTERSECTIONEPS) ||
+               !(split < 1.0 - INTERSECTIONEPS) ||
+               !(along > INTERSECTIONEPS) ||
+               !(along < 1.0 - INTERSECTIONEPS) ||
+               (counterclockwise(m, b, torg, newvertex, endpoint1) <= 0.0) ||
+               (counterclockwise(m, b, newvertex, tdest, endpoint1) <= 0.0);
+  if (!degenerate && (oppotri.tri != m->dummytri)) {
+    apex(oppotri, farvertex);
+    degenerate = (counterclockwise(m, b, tdest, newvertex, farvertex) <= 0.0)
+              || (counterclockwise(m, b, newvertex, torg, farvertex) <= 0.0);
+  }
+  if (degenerate) {
+    printf("Internal error in segmentintersection():\n");
+    printf("  Intersection of nearly parallel segments is degenerate.\n");
+    triexit(1);
+  }
   /* Insert the intersection vertex.  This should always succeed. */
   success = insertvertex(m, b, newvertex, splittri, splitsubseg, 0, 0);
   if (success != SUCCESSFULVERTEX) {
@@ -11034,6 +11142,14 @@ void segmentintersection(struct mesh *m, struct behavior *b,
   }
   /* Record a triangle whose origin is the new vertex. */
   setvertex2tri(newvertex, encode(*splittri));
+  /* constrainededge() may call this with inverted triangles still        */
+  /*   pending.  The flips in insertvertex() resolve them only if the new */
+  /*   vertex lies exactly on the segment; roundoff can leave one behind. */
+  if (!fanisvalid(m, b, splittri)) {
+    printf("Internal error in segmentintersection():\n");
+    printf("  Inverted triangle left after splitting a segment.\n");
+    triexit(1);
+  }
   if (m->steinerleft > 0) {
     m->steinerleft--;
   }
@@ -11098,13 +11214,38 @@ int scoutsegment(struct mesh *m, struct behavior *b, struct otri *searchtri,
 {
   struct otri crosstri;
   struct osub crosssubseg;
-  vertex leftvertex, rightvertex;
+  vertex startvertex;
+  vertex leftvertex, rightvertex, collinearvertex;
+  REAL progress, seglength2;
   enum finddirectionresult collinear;
   subseg sptr;                      /* Temporary variable used by tspivot(). */
 
   collinear = finddirection(m, b, searchtri, endpoint2);
+  org(*searchtri, startvertex);
   dest(*searchtri, rightvertex);
   apex(*searchtri, leftvertex);
+  if ((collinear == LEFTCOLLINEAR) || (collinear == RIGHTCOLLINEAR)) {
+    /* A collinear vertex must lie strictly between the origin and        */
+    /*   endpoint2.  In a mesh of slivers made by nearly parallel         */
+    /*   segments, finddirection() can report one behind the origin or    */
+    /*   beyond endpoint2; following it recurses back and forth forever.  */
+    collinearvertex = (collinear == LEFTCOLLINEAR) ? leftvertex : rightvertex;
+    progress = (collinearvertex[0] - startvertex[0]) *
+               (endpoint2[0] - startvertex[0]) +
+               (collinearvertex[1] - startvertex[1]) *
+               (endpoint2[1] - startvertex[1]);
+    seglength2 = (endpoint2[0] - startvertex[0]) *
+                 (endpoint2[0] - startvertex[0]) +
+                 (endpoint2[1] - startvertex[1]) *
+                 (endpoint2[1] - startvertex[1]);
+    if (((collinearvertex[0] != endpoint2[0]) ||
+         (collinearvertex[1] != endpoint2[1])) &&
+        (!(progress > 0.0) || !(progress < seglength2))) {
+      printf("Internal error in scoutsegment():\n");
+      printf("  Collinear vertex lies outside the segment.\n");
+      triexit(1);
+    }
+  }
   if (((leftvertex[0] == endpoint2[0]) && (leftvertex[1] == endpoint2[1])) ||
       ((rightvertex[0] == endpoint2[0]) && (rightvertex[1] == endpoint2[1]))) {
     /* The segment is already an edge in the mesh. */
@@ -11647,10 +11788,13 @@ void formskeleton(struct mesh *m, struct behavior *b,
   char inputline[INPUTLINESIZE];
   char *stringptr;
 #endif /* not TRILIBRARY */
+  struct otri checktri;
   vertex endpoint1, endpoint2;
+  vertex torg, tdest, tapex;
   int segmentmarkers;
   int end1, end2;
   int boundmarker;
+  int saveexact;
   int i;
 
   if (b->poly) {
@@ -11751,6 +11895,28 @@ void formskeleton(struct mesh *m, struct behavior *b,
         }
       }
     }
+    /* Roundoff at the intersections of nearly parallel segments can leave */
+    /*   inverted triangles behind, which later stages can't cope with    */
+    /*   (they crash or loop forever).  Refuse to go on with such a mesh. */
+    /*   Use exact arithmetic even if the -X switch turned it off.        */
+    saveexact = b->noexact;
+    b->noexact = 0;
+    traversalinit(&m->triangles);
+    checktri.orient = 0;
+    checktri.tri = triangletraverse(m);
+    while (checktri.tri != (triangle *) NULL) {
+      org(checktri, torg);
+      dest(checktri, tdest);
+      apex(checktri, tapex);
+      if (counterclockwise(m, b, torg, tdest, tapex) <= 0.0) {
+        b->noexact = saveexact;
+        printf("Internal error in formskeleton():\n");
+        printf("  Inverted triangle after inserting segments.\n");
+        triexit(1);
+      }
+      checktri.tri = triangletraverse(m);
+    }
+    b->noexact = saveexact;
   } else {
     m->insegments = 0;
   }
